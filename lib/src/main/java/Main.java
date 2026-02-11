@@ -24,7 +24,7 @@ public class Main {
         assert zipUrl != null;
         var zs = new ZipStream(new File(zipUrl.toURI()));
 
-        server.createContext("/", handleError(getDataHandler(zs)));
+        server.createContext("/", handleError(getDataHandler(zs, "jacocoHtml/")));
         server.start();
         System.out.println("Server started at http://" + address + "/");
         Thread.currentThread().join();
@@ -123,32 +123,22 @@ public class Main {
         }
     }
 
-    private static HttpHandler getDataHandler(ZipStream zs) {
+    private static HttpHandler getDataHandler(ZipStream zs, String prefix) {
         return exchange -> {
             if (!"GET".equals(exchange.getRequestMethod())) {
                 exchange.sendResponseHeaders(405, 0);
                 return;
             }
 
-            var responseHeaders = exchange.getResponseHeaders();
-
             var path = exchange.getRequestURI().getPath();
-
-            if ("/".equals(path)) path = "/jacocoHtml/";
-
-
-            if (path.endsWith("/")) {
-                responseHeaders.add("Location", path + "index.html");
-                exchange.sendResponseHeaders(302, 0);
-                return;
-            }
-
-            var entry = getEntry(zs, path.substring(1));
+            var suffix = path.endsWith("/") ? "index.html" : "";
+            var entry = getEntry(zs, prefix + path.substring(1) + suffix);
             if (entry == null) {
                 exchange.sendResponseHeaders(404, 0);
                 return;
             }
 
+            var responseHeaders = exchange.getResponseHeaders();
             responseHeaders.add("Content-Type", contentType(entry.getName()));
             long extraSize;
             InputStream is;
