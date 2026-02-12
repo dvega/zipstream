@@ -1,3 +1,9 @@
+import static java.net.HttpURLConnection.HTTP_BAD_METHOD;
+import static java.net.HttpURLConnection.HTTP_INTERNAL_ERROR;
+import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
+import static java.net.HttpURLConnection.HTTP_NOT_IMPLEMENTED;
+import static java.net.HttpURLConnection.HTTP_OK;
+
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import dv5a.zipstream.ZipStream;
@@ -8,26 +14,37 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.net.URISyntaxException;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ForkJoinPool;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-
+/**
+ * Sample usage of ZipStream. It starts a web server that serves files directly from a ZIP archive
+ * without decompressing them.
+ */
 public class Main {
     public static void main(String[] args)
-            throws URISyntaxException, IOException, InterruptedException {
+            throws IOException, InterruptedException {
         var address = new InetSocketAddress("127.0.0.1", 8765);
         var server = HttpServer.create(address, 0);
-        var zipUrl = Main.class.getResource("/jacoco.zip");
+        server.setExecutor(ForkJoinPool.commonPool());
+        var zipUrl = Main.class.getResource("jacoco.zip");
         assert zipUrl != null;
-        var zs = new ZipStream(new File(zipUrl.toURI()));
+        var zs = new ZipStream(new File(URI.create(zipUrl.toString())));
 
-        server.createContext("/", handleError(getDataHandler(zs, "jacocoHtml/")));
+        server.createContext("/", handleError(getDataHandler(zs)));
         server.start();
-        System.out.println("Server started at http://" + address + "/");
-        Thread.currentThread().join();
+        System.out.println("Server started at http:/" + address + "/");
+        Thread.currentThread().join(); // Wait for Ctrl-C
         server.stop(5);
         zs.close();
     }
@@ -99,66 +116,84 @@ public class Main {
         return concat(is1, entry.rawData(),  is3);
     }
 
-    private static Entry getEntry(ZipStream zs, String path) throws IOException {
-        for (Entry entry : zs.entries()) {
-            if (entry.getName().equals(path)) return entry;
-        }
-        return null;
+    private static final Map<String, Entry> ENTRY_CACHE  = new ConcurrentHashMap<>();
+
+    private static Entry getEntry(ZipStream zs, String path) {
+        return ENTRY_CACHE.computeIfAbsent(path, k -> {
+            for (Entry entry : zs.entries()) {
+                if (entry.getName().equals(path)) return entry;
+            }
+            return null;
+        });
     }
 
     private static String extension(String fileName) {
-        int p1 = fileName.lastIndexOf('/');
-        int p2 = fileName.lastIndexOf('.');
-        if (p2 <= p1) return "";
-        return fileName.substring(p2);
+        int p1 = fileName.lastIndexOf('.');
+        if (p1 < 0) return "";
+        int p2 = fileName.lastIndexOf('/');
+        return p1 < p2 ? "" : fileName.substring(p2);
     }
 
     private static String contentType(String name) {
-        switch (extension(name)) {
-            case ".html": return "text/html";
+        switch (extension(name).toLowerCase()) {
+            case ".html": return "text/html; charset=utf-8";
             case ".gif": return "image/gif";
-            case ".css": return "text/css";
+            case ".css": return "text/css; charset=utf-8";
             case ".js": return "text/javascript";
             default: return "application/octet-stream";
         }
     }
 
-    private static HttpHandler getDataHandler(ZipStream zs, String prefix) {
+    private static HttpHandler getDataHandler(ZipStream zs) {
         return exchange -> {
             if (!"GET".equals(exchange.getRequestMethod())) {
-                exchange.sendResponseHeaders(405, 0);
+                exchange.sendResponseHeaders(HTTP_BAD_METHOD, 0);
                 return;
             }
 
+            var contextPath = exchange.getHttpContext().getPath();
             var path = exchange.getRequestURI().getPath();
-            var suffix = path.endsWith("/") ? "index.html" : "";
-            var entry = getEntry(zs, prefix + path.substring(1) + suffix);
+            if (path.endsWith("/")) path += "index.html";
+            path = path.substring(contextPath.length());
+            var entry = getEntry(zs,  path);
             if (entry == null) {
-                exchange.sendResponseHeaders(404, 0);
+                exchange.sendResponseHeaders(HTTP_NOT_FOUND, 0);
                 return;
             }
 
             var responseHeaders = exchange.getResponseHeaders();
-            responseHeaders.add("Content-Type", contentType(entry.getName()));
-            long extraSize;
+            long responseLength = entry.getCompressedSize();
             InputStream is;
             switch (entry.getMethod()) {
                 case DEFLATED:
                     responseHeaders.add("Content-Encoding", "gzip");
                     is = toGzip(entry);
-                    extraSize = 18;
+                    responseLength += 18;
                     break;
                 case STORED:
                     is = entry.rawData();
-                    extraSize = 0;
                     break;
-                default: exchange.sendResponseHeaders(400, 0); return;
+                default: exchange.sendResponseHeaders(HTTP_NOT_IMPLEMENTED, 0); return;
             }
-            exchange.sendResponseHeaders(200, entry.getCompressedSize() + extraSize);
+
+            responseHeaders.add("Content-Type", contentType(entry.getName()));
+            var date = entry.getDateTime();
+            if (date != null) {
+                responseHeaders.add("Last-Modified", httpFormat(date));
+            }
+
+            exchange.sendResponseHeaders(HTTP_OK, responseLength);
             try (is; var os = exchange.getResponseBody()) {
                 is.transferTo(os);
             }
         };
+    }
+
+    private static String httpFormat(LocalDateTime date) {
+        var odt = date.atZone(ZoneId.systemDefault())
+                .toOffsetDateTime()
+                .withOffsetSameInstant(ZoneOffset.UTC);
+        return DateTimeFormatter.RFC_1123_DATE_TIME.format(odt);
     }
 
     private static HttpHandler handleError(HttpHandler delegate) {
@@ -166,14 +201,10 @@ public class Main {
             try {
                 delegate.handle(exchange);
             } catch (Exception e) {
-                Logger logger = Logger.getGlobal();
-                logger.log(Level.SEVERE, "An error occurred while handling the request", e);
+                Logger.getGlobal()
+                        .log(Level.SEVERE, "An error occurred while handling the request", e);
                 exchange.getResponseHeaders().clear();
-                try {
-                    exchange.sendResponseHeaders(500, 0);
-                } catch (IOException ioe) {
-                    logger.info("handleError failed to send headers: " + ioe);
-                }
+                exchange.sendResponseHeaders(HTTP_INTERNAL_ERROR, 0);
             }
             exchange.getResponseBody().close();
         };

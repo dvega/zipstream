@@ -11,6 +11,7 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.AbstractCollection;
 import java.util.Collection;
 import java.util.Iterator;
@@ -18,11 +19,36 @@ import java.util.NoSuchElementException;
 
 /**
  * A class for reading ZIP files.
+ * <p>
  * This class provides functionality to open a ZIP file, iterate over its entries,
  * and access the raw data of each entry.
+ * <p>This class is mostly thread-safe except for the {@link InputStream} returned by
+ * {@link Entry#rawData()} and the {@link Iterator} returned by
+ * {@link #entries()}{@code .iterator()}.
+ * A single instance cannot be used concurrently without external synchronization.
  */
 public class ZipStream implements Closeable  {
     private final RandomAccessFile in;
+
+    private final Collection<Entry> entries = new AbstractCollection<>() {
+        private EOCD findECODUnchecked() {
+            try {
+                return findEOCD();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        @Override
+        public Iterator<Entry> iterator() {
+            return getIterator(findECODUnchecked());
+        }
+
+        @Override
+        public int size() {
+            return findECODUnchecked().entryCount;
+        }
+    };
 
     /**
      * Constructs a new ZipStream from the specified file.
@@ -53,8 +79,8 @@ public class ZipStream implements Closeable  {
     }
 
     private static class EOCD {
-        private final int entryCount;
         private final long centralDirectoryOffset;
+        private final int entryCount;
         private final int diskNumber;
 
         private EOCD(int diskNumber, int entryCount, long centralDirectoryOffset) {
@@ -68,20 +94,20 @@ public class ZipStream implements Closeable  {
      * Represents an entry in a ZIP file.
      */
     public static class Entry {
-        final RandomAccessFile in;
-        final int thisDiskNumber;
-        final String name;
+        private final FileChannel channel;
+        private final int thisDiskNumber;
+        private final String name;
+        private final char method;
+        private final char time;
+        private final char date;
+        private final int crc32;
         private final long compressedSize;
         private final long uncompressedSize;
-        final long fileHeaderOffset;
-        private final int crc32;
-        final char time;
-        final char date;
-        final char method;
-        final char diskNumber;
-        final char nameLength;
-        final char extraFieldLength;
-        final char commentLength;
+        private final char nameLength;
+        private final char extraFieldLength;
+        private final char commentLength;
+        private final long fileHeaderOffset;
+        private final char fileDiskNumber;
 
         /**
          * Returns the compressed size of the entry data.
@@ -128,8 +154,8 @@ public class ZipStream implements Closeable  {
             OTHER
         }
 
-        private Entry(RandomAccessFile in, ByteBuffer buff, FileChannel channel, int thisDiskNumber) throws IOException {
-            this.in = in;
+        private Entry(ByteBuffer buff, FileChannel channel, long namePosition, int thisDiskNumber) throws IOException {
+            this.channel = channel;
             this.thisDiskNumber = thisDiskNumber;
             if (buff.getInt(0) != 0x02014B50) throw new ZipStreamException("Invalid central directory header");
             int versionMadeBy = buff.getChar(4);
@@ -143,10 +169,10 @@ public class ZipStream implements Closeable  {
             this.nameLength = buff.getChar(28);
             this.extraFieldLength = buff.getChar(30);
             this.commentLength = buff.getChar(32);
-            this.diskNumber = buff.getChar(34);
+            this.fileDiskNumber = buff.getChar(34);
             this.fileHeaderOffset = buff.getInt(42) & 0xFFFFFFFFL;
             var nameBuffer = ByteBuffer.allocate(this.nameLength);
-            var nread = channel.read(nameBuffer);
+            var nread = channel.read(nameBuffer, namePosition);
             if (nread != nameBuffer.capacity()) throw new ZipStreamException("Incomplete read");
             Charset charset = ((versionMadeBy & 0xFF00) == 0x300 /* Unix */) || (generalPurposeFlags & 0x800) != 0
                     ? StandardCharsets.UTF_8
@@ -173,6 +199,24 @@ public class ZipStream implements Closeable  {
         }
 
         /**
+         * Returns the last modified date-time for this entry.
+         *
+         * @return the last modified date-time or {@code null} if not available.
+         */
+        public LocalDateTime getDateTime() {
+            var date0 = date;
+            if (date0 == 0) return null;
+            var time0 = time;
+            return LocalDateTime.of(
+                    (date0 >> 9) + 1980,
+                    (date0 >> 5) & 0x0F,
+                    date0 & 0x1F,
+                    time0 >> 11,
+                    (time0 >> 5) & 0x3F,
+                    (time0 << 1) & 0x3F);
+        }
+
+        /**
          * Returns the compression method used for this entry as a {@link Method} enum.
          *
          * @return the compression method.
@@ -193,10 +237,9 @@ public class ZipStream implements Closeable  {
          * @throws ZipStreamException if the ZIP file structure is invalid or multi-disk ZIPs are encountered.
          */
         public InputStream rawData() throws IOException {
-            if (this.diskNumber != this.thisDiskNumber) {
+            if (this.fileDiskNumber != this.thisDiskNumber) {
                 throw new ZipStreamException("Multi-disk ZIP files not supported");
             }
-            var channel = in.getChannel();
             var buff = ByteBuffer.allocate(30).order(ByteOrder.LITTLE_ENDIAN);
             var nread = channel.read(buff, this.fileHeaderOffset);
             if (nread != buff.capacity()) throw new ZipStreamException("Incomplete read");
@@ -204,24 +247,27 @@ public class ZipStream implements Closeable  {
             int fileNameLength = buff.getChar(26);
             int extraFieldLength = buff.getChar(28);
             long startPos = this.fileHeaderOffset + buff.capacity() + fileNameLength + extraFieldLength;
-            long compressedSize = this.compressedSize;
+            long endPos = startPos + compressedSize;
             return new InputStream() {
                 long pos = startPos;
+
                 @Override
                 public int read() throws IOException {
                     byte[] b1 = new byte[1];
-                    var nread = read(b1, 0, 1);
-                    return nread == 1 ? b1[0] & 0xFF : -1;
+                    while(true) {
+                        var nread = read(b1, 0, 1);
+                        if (nread < 0) return -1;
+                        if (nread > 0) return b1[0] & 0xFF;
+                    }
                 }
 
                 @Override
                 public int read(byte[] b, int off, int len) throws IOException {
                     if (pos < 0) throw new IOException("Stream closed");
                     var buff = ByteBuffer.wrap(b, off, len);
-                    long remaining = compressedSize - (pos - startPos);
+                    long remaining = endPos - pos;
                     if (remaining <= 0) return -1;
-                    if (remaining < len) len = (int) remaining;
-                    buff.limit(off + len);
+                    if (remaining < len) buff.limit(off + (int) remaining);
                     var nread = channel.read(buff, pos);
                     if (nread < 0) return -1;
                     pos += nread;
@@ -241,6 +287,7 @@ public class ZipStream implements Closeable  {
                     "name='" + name + '\'' +
                     ", method=" + getMethod() +
                     ", size=" + uncompressedSize +
+                    ", time=" + getDateTime() +
                     '}';
         }
     }
@@ -249,26 +296,15 @@ public class ZipStream implements Closeable  {
      * Returns a collection of all entries in the ZIP file.
      *
      * @return a collection of {@link Entry} objects.
-     * @throws IOException if an I/O error occurs while reading the ZIP file structure.
      */
-    public Collection<Entry> entries() throws IOException {
-        var eocd = findEOCD();
-
-        return new AbstractCollection<>() {
-            @Override
-            public Iterator<Entry> iterator() {
-                return getIterator(eocd);
-            }
-
-            @Override
-            public int size() {
-                return eocd.entryCount;
-            }
-        };
+    public Collection<Entry> entries() {
+        return entries;
     }
 
     private Iterator<Entry> getIterator(EOCD eocd) {
+        var channel = in.getChannel();
         return new Iterator<>() {
+            final ByteBuffer buff = ByteBuffer.allocate(46).order(ByteOrder.LITTLE_ENDIAN);
             int count = eocd.entryCount;
             long nextOffset = eocd.centralDirectoryOffset;
 
@@ -279,14 +315,11 @@ public class ZipStream implements Closeable  {
 
             private Entry next0() throws IOException {
                 if (!hasNext()) throw new NoSuchElementException();
-
-                var buff = ByteBuffer.allocate(46).order(ByteOrder.LITTLE_ENDIAN);
-                var channel = in.getChannel();
-                channel.position(nextOffset);
-                int nread = channel.read(buff);
+                buff.clear();
+                int nread = channel.read(buff, nextOffset);
                 if (nread != buff.capacity()) throw new ZipStreamException("Incomplete read");
-                var entry = new Entry(in, buff, channel, eocd.diskNumber);
-                nextOffset += 46 + entry.nameLength + entry.extraFieldLength + entry.commentLength;
+                var entry = new Entry(buff, channel, nextOffset + nread, eocd.diskNumber);
+                nextOffset += nread + entry.nameLength + entry.extraFieldLength + entry.commentLength;
                 count--;
                 return entry;
             }
@@ -309,6 +342,7 @@ public class ZipStream implements Closeable  {
         if (size < 22) throw new ZipStreamException("Not a zip file");
         var buff = ByteBuffer.allocate(BUFF_SIZE + 21).order(ByteOrder.LITTLE_ENDIAN);
         var fpos = size;
+        int initPos = BUFF_SIZE - 22;
 
         while (true) {
             var nbytes = BUFF_SIZE;
@@ -322,7 +356,7 @@ public class ZipStream implements Closeable  {
             var nread = channel.read(buff, fpos);
             if (nread != nbytes) throw new ZipStreamException("Incomplete read");
             buff.limit(buff.capacity());
-            for (int i = BUFF_SIZE - 1; i >= 0 ; i--) {
+            for (int i = initPos; i >= 0 ; i--) {
                 if (buff.getInt(i) == 0x06054b50) {
                     char diskNumber = buff.getChar(i + 4);
                     char entryCount = buff.getChar(i + 8);
@@ -333,6 +367,7 @@ public class ZipStream implements Closeable  {
             if (fpos <= 0) break;
             var array = buff.array();
             System.arraycopy(array, 0, array, BUFF_SIZE, 21);
+            initPos = BUFF_SIZE - 1;
         }
         throw new ZipStreamException("Not a zip file");
     }
