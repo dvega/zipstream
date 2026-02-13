@@ -36,13 +36,13 @@ import java.util.zip.GZIPInputStream;
  * Sample usage of ZipStream. It starts a web server that serves files directly from a ZIP archive
  * without decompressing them.
  */
-public class Main {
+public class DemoServer {
     public static void main(String[] args)
             throws IOException, URISyntaxException {
         var address = new InetSocketAddress("127.0.0.1", 8765);
         var server = HttpServer.create(address, 0);
         server.setExecutor(ForkJoinPool.commonPool());
-        var zipUrl = Main.class.getResource("jacoco.zip");
+        var zipUrl = DemoServer.class.getResource("jacoco.zip");
         assert zipUrl != null;
         File zipFile = new File(zipUrl.toURI());
         ZipStream zipStream = new ZipStream(zipFile);
