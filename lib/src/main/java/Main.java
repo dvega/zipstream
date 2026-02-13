@@ -4,6 +4,7 @@ import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
 import static java.net.HttpURLConnection.HTTP_NOT_IMPLEMENTED;
 import static java.net.HttpURLConnection.HTTP_OK;
 
+import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import dv5a.zipstream.ZipStream;
@@ -14,18 +15,22 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Sample usage of ZipStream. It starts a web server that serves files directly from a ZIP archive
@@ -33,20 +38,17 @@ import java.util.logging.Logger;
  */
 public class Main {
     public static void main(String[] args)
-            throws IOException, InterruptedException {
+            throws IOException, URISyntaxException {
         var address = new InetSocketAddress("127.0.0.1", 8765);
         var server = HttpServer.create(address, 0);
         server.setExecutor(ForkJoinPool.commonPool());
         var zipUrl = Main.class.getResource("jacoco.zip");
         assert zipUrl != null;
-        var zs = new ZipStream(new File(URI.create(zipUrl.toString())));
-
-        server.createContext("/", handleError(getDataHandler(zs)));
+        File zipFile = new File(zipUrl.toURI());
+        ZipStream zipStream = new ZipStream(zipFile);
+        server.createContext("/", handleError(getDataHandler(zipStream)));
         server.start();
         System.out.println("Server started at http:/" + address + "/");
-        Thread.currentThread().join(); // Wait for Ctrl-C
-        server.stop(5);
-        zs.close();
     }
 
     private static InputStream concat(InputStream... streams) {
@@ -128,17 +130,15 @@ public class Main {
     }
 
     private static String extension(String fileName) {
-        int p1 = fileName.lastIndexOf('.');
-        if (p1 < 0) return "";
-        int p2 = fileName.lastIndexOf('/');
-        return p1 < p2 ? "" : fileName.substring(p2);
+        int p = fileName.lastIndexOf('.');
+        return p < 0 ? "" : fileName.indexOf('/', p) >= 0 ? "" : fileName.substring(p);
     }
 
     private static String contentType(String name) {
-        switch (extension(name).toLowerCase()) {
-            case ".html": return "text/html; charset=utf-8";
+        switch (extension(name).toLowerCase(Locale.ROOT)) {
+            case ".html": return "text/html; charset=UTF-8";
             case ".gif": return "image/gif";
-            case ".css": return "text/css; charset=utf-8";
+            case ".css": return "text/css; charset=UTF-8";
             case ".js": return "text/javascript";
             default: return "application/octet-stream";
         }
@@ -162,16 +162,22 @@ public class Main {
             }
 
             var responseHeaders = exchange.getResponseHeaders();
-            long responseLength = entry.getCompressedSize();
-            InputStream is;
+            final long responseLength;
+            final InputStream is;
             switch (entry.getMethod()) {
                 case DEFLATED:
-                    responseHeaders.add("Content-Encoding", "gzip");
-                    is = toGzip(entry);
-                    responseLength += 18;
+                    if (acceptsEncodingGZip(exchange.getRequestHeaders())) {
+                        responseHeaders.add("Content-Encoding", "gzip");
+                        is = toGzip(entry);
+                        responseLength = entry.getCompressedSize() + 18;
+                    } else {
+                        is = new GZIPInputStream(toGzip(entry));
+                        responseLength = entry.getUncompressedSize();
+                    }
                     break;
                 case STORED:
                     is = entry.rawData();
+                    responseLength = entry.getCompressedSize();
                     break;
                 default: exchange.sendResponseHeaders(HTTP_NOT_IMPLEMENTED, 0); return;
             }
@@ -187,6 +193,13 @@ public class Main {
                 is.transferTo(os);
             }
         };
+    }
+
+    private static boolean acceptsEncodingGZip(Headers requestHeaders) {
+        List<String> values = requestHeaders.get("Accept-Encoding");
+        return values != null && values.stream()
+                .flatMap(v -> Arrays.stream(v.split(",")))
+                .anyMatch(v -> v.trim().equalsIgnoreCase("gzip"));
     }
 
     private static String httpFormat(LocalDateTime date) {

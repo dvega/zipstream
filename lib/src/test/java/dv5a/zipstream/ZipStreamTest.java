@@ -8,15 +8,22 @@ import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.stream.Collectors;
 import org.junit.Test;
 
-import static org.junit.Assert.*;
+import static org.hamcrest.CoreMatchers.hasItem;
+import static org.hamcrest.CoreMatchers.hasItems;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 
 public class ZipStreamTest {
     @Test
     public void macos() throws IOException {
         var zs = new ZipStream(resource("/macos.zip"));
         zs.entries().forEach(System.out::println);
+        assertThat(entryNames(zs), hasItem("__MACOSX/java/._Main.java"));
         zs.close();
     }
 
@@ -24,6 +31,7 @@ public class ZipStreamTest {
     public void i8nChars() throws IOException {
         var zs = new ZipStream(resource("/intchars.zip"));
         zs.entries().forEach(System.out::println);
+        assertThat(entryNames(zs), hasItems("patiño.txt", "pingüino.txt", "árbol.txt"));
         zs.close();
     }
 
@@ -45,6 +53,7 @@ public class ZipStreamTest {
     public void msdos() throws IOException {
         var zs = new ZipStream(resource("/MSDOS.ZIP"));
         zs.entries().forEach(System.out::println);
+        assertThat(entryNames(zs), hasItems("AA/", "AA/UNO.TXT", "AA/AÑO.TXT", "AA/ÉXITO.TXT", "AA/PINGÜINO.TXT"));
         zs.close();
     }
 
@@ -52,7 +61,31 @@ public class ZipStreamTest {
     public void winzip() throws IOException {
         var zs = new ZipStream(resource("/winzip.zip"));
         zs.entries().forEach(System.out::println);
+        assertThat(entryNames(zs), hasItems("a/patiño.txt", "a/pingüino.txt", "a/árbol.txt", "a/"));
         zs.close();
+    }
+
+    @Test
+    public void extradata() throws IOException {
+        var zs = new ZipStream(resource("/extradata.zip"));
+        zs.entries().forEach(System.out::println);
+        assertThat(entryNames(zs), hasItems("aa/«hola».txt", "aa/árbol.txt", "aa/patiño.txt", "aa/pingüino.txt"));
+        zs.close();
+    }
+
+    @Test
+    public void zipfldr() throws IOException {
+        var zs = new ZipStream(resource("/zipfldr.zip"));
+        zs.entries().forEach(System.out::println);
+        assertThat(entryNames(zs), hasItems("aa/«hola».txt", "aa/árbol.txt", "aa/patiño.txt", "aa/pingüino.txt"));
+        zs.close();
+    }
+
+    private static List<String> entryNames(ZipStream zs) {
+        return zs.entries()
+                .stream()
+                .map(Entry::getName)
+                .collect(Collectors.toList());
     }
 
     @Test
@@ -70,6 +103,7 @@ public class ZipStreamTest {
     public void empty() throws IOException {
         var zs = new ZipStream(resource("/empty.zip"));
         zs.entries().forEach(System.out::println);
+        assertEquals(0, entryNames(zs).size());
         zs.close();
     }
 

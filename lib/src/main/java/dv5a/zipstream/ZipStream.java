@@ -264,9 +264,9 @@ public class ZipStream implements Closeable  {
                 @Override
                 public int read(byte[] b, int off, int len) throws IOException {
                     if (pos < 0) throw new IOException("Stream closed");
-                    var buff = ByteBuffer.wrap(b, off, len);
                     long remaining = endPos - pos;
                     if (remaining <= 0) return -1;
+                    var buff = ByteBuffer.wrap(b, off, len);
                     if (remaining < len) buff.limit(off + (int) remaining);
                     var nread = channel.read(buff, pos);
                     if (nread < 0) return -1;
