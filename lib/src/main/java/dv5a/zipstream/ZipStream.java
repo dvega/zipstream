@@ -25,41 +25,23 @@ import java.util.NoSuchElementException;
  * <p>This class is mostly thread-safe except for the {@link InputStream} returned by
  * {@link Entry#rawData()} and the {@link Iterator} returned by
  * {@link #entries()}{@code .iterator()}.
- * A single instance cannot be used concurrently without external synchronization.
+ * A single instance of these classes cannot be used concurrently without external synchronization.
  */
 public class ZipStream implements Closeable  {
+    private final Collection<Entry> entries = createEntriesCollection();
     private final RandomAccessFile in;
-
-    private final Collection<Entry> entries = new AbstractCollection<>() {
-        private EOCD findECODUnchecked() {
-            try {
-                return findEOCD();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        }
-
-        @Override
-        public Iterator<Entry> iterator() {
-            return getIterator(findECODUnchecked());
-        }
-
-        @Override
-        public int size() {
-            return findECODUnchecked().entryCount;
-        }
-    };
 
     /**
      * Constructs a new ZipStream from the specified file.
      *
      * @param file the ZIP file to be opened.
      * @throws IOException if an I/O error occurs while opening the file.
+     * @throws ZipStreamException if the file is not a valid ZIP file.
      */
     public ZipStream(File file) throws IOException {
         this.in = new RandomAccessFile(file, "r");
         try {
-            findEOCD();
+            findEOCD(in.getChannel());
         } catch (Throwable e) {
             try (in) {
                 throw e;
@@ -76,6 +58,29 @@ public class ZipStream implements Closeable  {
     @Override
     public void close() throws IOException {
         in.close();
+    }
+
+    private AbstractCollection<Entry> createEntriesCollection() {
+        return new AbstractCollection<>() {
+            private EOCD findEOCDUnchecked(FileChannel channel) {
+                try {
+                    return findEOCD(channel);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+
+            @Override
+            public Iterator<Entry> iterator() {
+                var channel = in.getChannel();
+                return createIterator(findEOCDUnchecked(channel), channel);
+            }
+
+            @Override
+            public int size() {
+                return findEOCDUnchecked(in.getChannel()).entryCount;
+            }
+        };
     }
 
     private static class EOCD {
@@ -247,7 +252,7 @@ public class ZipStream implements Closeable  {
             int fileNameLength = buff.getChar(26);
             int extraFieldLength = buff.getChar(28);
             long startPos = this.fileHeaderOffset + buff.capacity() + fileNameLength + extraFieldLength;
-            long endPos = startPos + compressedSize;
+            long endPos = startPos + this.compressedSize;
             return new InputStream() {
                 long pos = startPos;
 
@@ -301,8 +306,7 @@ public class ZipStream implements Closeable  {
         return entries;
     }
 
-    private Iterator<Entry> getIterator(EOCD eocd) {
-        var channel = in.getChannel();
+    private static Iterator<Entry> createIterator(EOCD eocd, FileChannel channel) {
         return new Iterator<>() {
             final ByteBuffer buff = ByteBuffer.allocate(46).order(ByteOrder.LITTLE_ENDIAN);
             int count = eocd.entryCount;
@@ -335,17 +339,16 @@ public class ZipStream implements Closeable  {
         };
     }
 
-    private EOCD findEOCD() throws IOException {
+    private static EOCD findEOCD(FileChannel channel) throws IOException {
         final int BUFF_SIZE = 1024;
-        var channel = in.getChannel();
         var size = channel.size();
         if (size < 22) throw new ZipStreamException("Not a zip file");
         var buff = ByteBuffer.allocate(BUFF_SIZE + 21).order(ByteOrder.LITTLE_ENDIAN);
         var fpos = size;
-        int initPos = BUFF_SIZE - 22;
+        int i = BUFF_SIZE - 22;
+        int nbytes = BUFF_SIZE;
 
         while (true) {
-            var nbytes = BUFF_SIZE;
             fpos -= BUFF_SIZE;
             if (fpos < 0) {
                 nbytes += (int) fpos;
@@ -356,7 +359,7 @@ public class ZipStream implements Closeable  {
             var nread = channel.read(buff, fpos);
             if (nread != nbytes) throw new ZipStreamException("Incomplete read");
             buff.limit(buff.capacity());
-            for (int i = initPos; i >= 0 ; i--) {
+            for (; i >= 0 ; i--) {
                 if (buff.getInt(i) == 0x06054b50) {
                     char diskNumber = buff.getChar(i + 4);
                     char entryCount = buff.getChar(i + 8);
@@ -367,7 +370,7 @@ public class ZipStream implements Closeable  {
             if (fpos <= 0) break;
             var array = buff.array();
             System.arraycopy(array, 0, array, BUFF_SIZE, 21);
-            initPos = BUFF_SIZE - 1;
+            i = BUFF_SIZE - 1;
         }
         throw new ZipStreamException("Not a zip file");
     }
