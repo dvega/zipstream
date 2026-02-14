@@ -16,6 +16,7 @@ import static org.hamcrest.CoreMatchers.hasItem;
 import static org.hamcrest.CoreMatchers.hasItems;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 
 public class ZipStreamTest {
@@ -102,8 +103,12 @@ public class ZipStreamTest {
     @Test
     public void empty() throws IOException {
         var zs = new ZipStream(resource("/empty.zip"));
-        zs.entries().forEach(System.out::println);
-        assertEquals(0, entryNames(zs).size());
+        for (int i = 0; i < 3; i++) {
+            var entries = zs.entries();
+            entries.forEach(System.out::println);
+            assertFalse(entries.iterator().hasNext());
+            assertEquals(0, entries.size());
+        }
         zs.close();
     }
 
