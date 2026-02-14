@@ -21,11 +21,24 @@ import java.util.NoSuchElementException;
  * A class for reading ZIP files.
  * <p>
  * This class provides functionality to open a ZIP file, iterate over its entries,
- * and access the raw data of each entry.
- * <p>This class is mostly thread-safe except for the {@link InputStream} returned by
- * {@link Entry#rawData()} and the {@link Iterator} returned by
- * {@link #entries()}{@code .iterator()}.
- * A single instance of these classes cannot be used concurrently without external synchronization.
+ * and access the raw (potentially compressed) data of each entry. It is designed
+ * for scenarios where you need to read entry data directly.
+ * <p>
+ * Possible usages:
+ *  <ul>
+ *      <li>Serve files from a ZIP archive over a network without decompressing them
+ *      <li>Convert files to GZIP or ZLIB format without recompression
+ *  </ul>
+ *
+ * <h3>Thread Safety</h3>
+ * The {@code ZipStream} instance is thread-safe and can be shared across multiple threads.
+ * The {@link Entry} objects are also immutable and thread-safe.
+ * <p>
+ * However, the {@link Iterator} returned by {@code entries().iterator()} and the
+ * {@link InputStream} returned by {@code Entry.rawData()} are <b>not</b> thread-safe.
+ * These objects are stateful and must not be shared between threads without external
+ * synchronization. Each thread should obtain its own iterator from the entries collection
+ * and its own input stream from an entry.
  */
 public class ZipStream implements Closeable  {
     private final Collection<Entry> entries = createEntriesCollection();
@@ -197,6 +210,9 @@ public class ZipStream implements Closeable  {
         /**
          * Returns the compression method used for this entry.
          *
+         * @see #getMethod()
+         * @see <a href="https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT">.ZIP File
+         * Format Specification</a> - Section 4.4.5 compression method
          * @return the compression method as an integer.
          */
         public int getCompressionMethod() {
