@@ -2,6 +2,7 @@ import static java.net.HttpURLConnection.HTTP_BAD_METHOD;
 import static java.net.HttpURLConnection.HTTP_INTERNAL_ERROR;
 import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
 import static java.net.HttpURLConnection.HTTP_NOT_IMPLEMENTED;
+import static java.net.HttpURLConnection.HTTP_NOT_MODIFIED;
 import static java.net.HttpURLConnection.HTTP_OK;
 
 import com.sun.net.httpserver.Headers;
@@ -18,7 +19,9 @@ import java.net.InetSocketAddress;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -148,7 +151,7 @@ public class DemoServer {
     private static HttpHandler getDataHandler(ZipStream zs) {
         return exchange -> {
             if (!"GET".equals(exchange.getRequestMethod())) {
-                exchange.sendResponseHeaders(HTTP_BAD_METHOD, 0);
+                exchange.sendResponseHeaders(HTTP_BAD_METHOD, -1);
                 return;
             }
 
@@ -156,10 +159,18 @@ public class DemoServer {
             var path = exchange.getRequestURI().getPath();
             if (path.endsWith("/")) path += "index.html";
             path = path.substring(contextPath.length());
-            var entry = getEntry(zs,  path);
+            var entry = getEntry(zs, path);
             if (entry == null) {
-                exchange.sendResponseHeaders(HTTP_NOT_FOUND, 0);
+                exchange.sendResponseHeaders(HTTP_NOT_FOUND, -1);
                 return;
+            }
+
+            var lastModified = toInstant(entry.getDateTime());
+            if (lastModified != null) {
+                if (!checkModifiedSince(exchange.getRequestHeaders(), lastModified)) {
+                    exchange.sendResponseHeaders(HTTP_NOT_MODIFIED, -1);
+                    return;
+                }
             }
 
             var responseHeaders = exchange.getResponseHeaders();
@@ -180,20 +191,39 @@ public class DemoServer {
                     is = entry.rawData();
                     responseLength = entry.getCompressedSize();
                     break;
-                default: exchange.sendResponseHeaders(HTTP_NOT_IMPLEMENTED, 0); return;
+                default: exchange.sendResponseHeaders(HTTP_NOT_IMPLEMENTED, -1); return;
             }
 
             responseHeaders.add("Content-Type", contentType(entry.getName()));
-            var date = entry.getDateTime();
-            if (date != null) {
-                responseHeaders.add("Last-Modified", httpFormat(date));
+
+            if (lastModified != null) {
+                responseHeaders.add("Last-Modified", httpFormat(lastModified));
             }
 
-            exchange.sendResponseHeaders(HTTP_OK, responseLength);
+            exchange.sendResponseHeaders(HTTP_OK, responseLength <= 0 ? -1 : responseLength);
             try (is; var os = exchange.getResponseBody()) {
                 is.transferTo(os);
             }
         };
+    }
+
+    private static Instant toInstant(LocalDateTime dateTime) {
+        return dateTime == null ? null : dateTime.atZone(ZoneId.systemDefault()).toInstant();
+    }
+
+    private static boolean checkModifiedSince(Headers requestHeaders, Instant lastModified) {
+        var ims = requestHeaders.get("If-Modified-Since");
+        if (ims == null || ims.size() > 1) return true;
+        var since = ims.get(0);
+        OffsetDateTime sinceDate;
+        try {
+            sinceDate = OffsetDateTime.parse(since, DateTimeFormatter.RFC_1123_DATE_TIME);
+        } catch (Exception ignore) {
+            Logger.getGlobal().log(Level.FINE, "Invalid If-Modified-Since header: {0} ",
+                            since);
+            return true;
+        }
+        return sinceDate.toInstant().isBefore(lastModified);
     }
 
     private static boolean acceptsEncodingGZip(Headers requestHeaders) {
@@ -203,11 +233,8 @@ public class DemoServer {
                 .anyMatch(v -> v.trim().equalsIgnoreCase("gzip"));
     }
 
-    private static String httpFormat(LocalDateTime date) {
-        var odt = date.atZone(ZoneId.systemDefault())
-                .toOffsetDateTime()
-                .withOffsetSameInstant(ZoneOffset.UTC);
-        return DateTimeFormatter.RFC_1123_DATE_TIME.format(odt);
+    private static String httpFormat(Instant date) {
+        return DateTimeFormatter.RFC_1123_DATE_TIME.format(date.atOffset(ZoneOffset.UTC));
     }
 
     private static HttpHandler handleError(HttpHandler delegate) {
@@ -218,7 +245,7 @@ public class DemoServer {
                 Logger.getGlobal()
                         .log(Level.SEVERE, "An error occurred while handling the request", e);
                 exchange.getResponseHeaders().clear();
-                exchange.sendResponseHeaders(HTTP_INTERNAL_ERROR, 0);
+                exchange.sendResponseHeaders(HTTP_INTERNAL_ERROR, -1);
             }
             exchange.getResponseBody().close();
         };
