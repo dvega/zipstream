@@ -37,7 +37,7 @@ import java.util.NoSuchElementException;
  * However, the {@link Iterator} returned by {@code entries().iterator()} and the
  * {@link InputStream} returned by {@code Entry.rawData()} are <b>not</b> thread-safe.
  * These objects are stateful and must not be shared between threads without external
- * synchronization. Each thread should obtain its own iterator from the entries collection
+ * synchronization. Each thread should get its own iterator from the entries collection
  * and its own input stream from an entry.
  */
 public class ZipStream implements Closeable  {

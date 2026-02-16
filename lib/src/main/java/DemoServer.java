@@ -109,13 +109,14 @@ public class DemoServer {
             throw new IllegalArgumentException("Entry is not DEFLATED: " + entry.getName());
         }
 
-        var is1 = new ByteArrayInputStream(GZIP_HEADER);
-        var buff2 = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
-        buff2.putInt(0, entry.getCrc32());
-        buff2.putInt(4, (int) entry.getUncompressedSize());
-        var is3 = new ByteArrayInputStream(buff2.array());
+        var header = new ByteArrayInputStream(GZIP_HEADER);
 
-        return concat(is1, entry.rawData(),  is3);
+        var buffer = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putInt(0, entry.getCrc32());
+        buffer.putInt(4, (int) entry.getUncompressedSize());
+        var trailer = new ByteArrayInputStream(buffer.array());
+
+        return concat(header, entry.rawData(),  trailer);
     }
 
     private static final Map<String, Entry> ENTRY_CACHE  = new ConcurrentHashMap<>();
