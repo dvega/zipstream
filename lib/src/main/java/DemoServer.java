@@ -15,6 +15,8 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.net.InetSocketAddress;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
@@ -31,8 +33,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -40,6 +40,8 @@ import java.util.zip.GZIPInputStream;
  * without decompressing them.
  */
 public class DemoServer {
+    private static final Logger LOGGER = System.getLogger(DemoServer.class.getName());
+
     public static void main(String[] args)
             throws IOException, URISyntaxException {
         var address = new InetSocketAddress("127.0.0.1", 8765);
@@ -219,8 +221,7 @@ public class DemoServer {
         try {
             sinceDate = OffsetDateTime.parse(since, DateTimeFormatter.RFC_1123_DATE_TIME);
         } catch (Exception ignore) {
-            Logger.getGlobal().log(Level.FINE, "Invalid If-Modified-Since header: {0} ",
-                            since);
+            LOGGER.log(Level.DEBUG, "Invalid If-Modified-Since header: {0} ", since);
             return true;
         }
         return sinceDate.toInstant().isBefore(lastModified);
@@ -242,8 +243,7 @@ public class DemoServer {
             try {
                 delegate.handle(exchange);
             } catch (Exception e) {
-                Logger.getGlobal()
-                        .log(Level.SEVERE, "An error occurred while handling the request", e);
+                LOGGER.log(Level.ERROR, "An error occurred while handling the request", e);
                 exchange.getResponseHeaders().clear();
                 exchange.sendResponseHeaders(HTTP_INTERNAL_ERROR, -1);
             }
